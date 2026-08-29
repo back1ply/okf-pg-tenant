@@ -17,7 +17,9 @@ everywhere. Production SaaS databases are usually neither.
 
 > [!NOTE]
 > **OKF** is a specification for representing structured metadata as markdown files with YAML
-> frontmatter. This project implements OKF v0.1.
+> frontmatter. This project implements **OKF v0.2** — every document carries `status`,
+> `sources` and `generated` provenance, and `stale_after` on request. v0.2 is additive, so the
+> bundles stay readable by v0.1 consumers.
 
 ## Why
 
@@ -45,6 +47,8 @@ drift invisible                     stragglers named
   capabilities *and counting the relations it chose not to document*.
 - **Treats table names as untrusted input** — a name is whatever someone typed inside
   `CREATE TABLE "..."`, and Postgres permits `..` and `/`.
+- **Emits OKF v0.2 provenance** — every document says what produced it, from which database,
+  and when. Credentials never reach the `sources` URI.
 
 ## What each one means
 
@@ -112,6 +116,31 @@ never quietly mean "drift: 0 among the things I bothered to look at":
 multiple, so those are spread unevenly: real drift, in a relation kind v0.1 does not document.
 Reporting the counts is what lets you see it.
 
+### Emits OKF v0.2 provenance
+
+```yaml
+status: stable
+sources:
+  - resource: postgresql://db.internal:5432/saas
+    id: saas
+    title: PostgreSQL catalog for saas
+generated:
+  by: process:okf-pg-tenant
+  at: 2026-08-29T10:49:18+00:00
+stale_after: 2026-09-28        # only with --stale-after-days
+```
+
+v0.2 separates *who produced* a document from *who verified* it. This producer fills
+`generated` and leaves `verified` empty, because nothing here verifies anything — claiming
+otherwise would be the exact failure the field exists to prevent.
+
+`stale_after` is omitted unless you pass `--stale-after-days`. How fast a schema snapshot goes
+stale is a property of your release cadence, not of this tool, and a made-up expiry date is
+worse than none.
+
+The `sources` URI is built from host, port and database only. A password in your DSN never
+reaches a document — there is a test that plants one and asserts it does not appear.
+
 ### Treats table names as untrusted input
 
 Writing `bundle/tenant/<table>.md` straight from the catalog would let a table named
@@ -144,6 +173,7 @@ python okf_pg_tenant.py --dsn "postgresql://user@host:5432/db" --out ./bundle
 | `--out` | `okf-bundle` | output directory |
 | `--tenant-pattern` | UUID regex | which schemas are tenants |
 | `--title` | `<db> knowledge bundle` | `index.md` heading |
+| `--stale-after-days` | omitted | emit an OKF v0.2 `stale_after` date this many days out |
 
 ```
 bundle/
@@ -180,20 +210,20 @@ Clean up with `docker rm -f okf-demo-pg`.
 ## Evidence
 
 ```bash
-python test_okf_pg_tenant.py    # 15 tests, plain asserts, no framework, no database
+python test_okf_pg_tenant.py    # 19 tests, plain asserts, no framework, no database
 python mutants.py               # 10 deliberate bugs, all must be caught
 ```
 
-**Coverage is 83%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
+**Coverage is 82%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
 the `__main__` guard. Every line that decides anything is covered; what is not covered is the
 database and CLI shell, proven by running the tool against a real database rather than by
 feeding a mock cursor its own answers back.
 
-**The suite is mutation-checked.** `mutants.py` introduces ten deliberate bugs one at a time —
+**The suite is mutation-checked.** `mutants.py` introduces thirteen deliberate bugs one at a time —
 the reference group picked by rarest signature instead of most common, `signature` ignoring
 nullability, `absent_from` adding instead of subtracting, filename sanitising disabled,
-collision detection disabled, and others. It restores the source afterwards and exits nonzero if
-any survives. All ten are caught.
+collision detection disabled, the source URI leaking a password, and others. It restores the source afterwards and exits nonzero if
+any survives. All thirteen are caught.
 
 > [!IMPORTANT]
 > A test suite that has never been seen failing is not evidence. That is what `mutants.py` is

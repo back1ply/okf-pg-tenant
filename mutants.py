@@ -52,6 +52,21 @@ MUTANTS = [
         "return entry[1]",
     ),
     (
+        "provenance emits stale_after even when none was asked for",
+        "    if stale_after:\n        lines.append",
+        "    if True:\n        lines.append",
+    ),
+    (
+        "provenance credits a human instead of the producer process",
+        f'f"  by: {{PRODUCER}}"',
+        'f"  by: human:someone"',
+    ),
+    (
+        "source_resource leaks the full conninfo instead of host/port/db",
+        'return f"postgresql://{host}:{port}/{dbname}"',
+        "return str(getattr(conn, 'info', ''))",
+    ),
+    (
         "render_skipped drops the not-drift-checked warning",
         '"so they are **not** covered by the drift check above.",',
         '"",',

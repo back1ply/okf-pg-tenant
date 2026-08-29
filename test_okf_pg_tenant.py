@@ -7,10 +7,12 @@ from okf_pg_tenant import (
     classify_schemas,
     collapse,
     drift_counts,
+    provenance,
     render_diagnostics,
     render_index,
     render_tenant_doc,
     resolve_doc_names,
+    source_resource,
 )
 
 T1 = "00000000-0000-4000-8000-000000000001"
@@ -238,6 +240,7 @@ def fake_catalog():
         "database": "saas",
         "extensions": [],
         "skipped": [],
+        "resource": "postgresql://db.example:5432/saas",
     }
 
 
@@ -270,6 +273,58 @@ def check_bundle(tmp_path):
     diagnostics = (tmp_path / "_diagnostics.md").read_text(encoding="utf-8")
     assert "tenant schemas with no tables: 1" in diagnostics
     assert "None. Every relation in scope is an ordinary table." in diagnostics
+
+
+def test_every_doc_carries_okf_v02_provenance():
+    with tempfile.TemporaryDirectory() as workdir:
+        out = Path(workdir)
+        build_bundle(fake_catalog(), out, DEFAULT_TENANT_PATTERN, "saas")
+        docs = [
+            out / "tenant" / "invoice.md",
+            out / "global" / "meta.tenant.md",
+            out / "_diagnostics.md",
+        ]
+        for doc in docs:
+            text = doc.read_text(encoding="utf-8")
+            assert "status: stable" in text, doc
+            assert "generated:" in text, doc
+            assert "  by: process:okf-pg-tenant" in text, doc
+            assert "resource: postgresql://db.example:5432/saas" in text, doc
+            assert "stale_after" not in text, doc
+
+
+class FakeConnInfo:
+    host = "db.internal"
+    port = 5432
+    dbname = "saas"
+    password = "hunter2"
+    user = "reader"
+
+    def __str__(self):
+        return "postgresql://reader:hunter2@db.internal:5432/saas"
+
+
+class FakeConn:
+    info = FakeConnInfo()
+
+
+def test_source_resource_never_carries_credentials():
+    resource = source_resource(FakeConn())
+    assert resource == "postgresql://db.internal:5432/saas"
+    for secret in ("hunter2", "reader", "@"):
+        assert secret not in resource, f"{secret!r} leaked into {resource!r}"
+
+
+def test_source_resource_falls_back_when_info_is_absent():
+    assert source_resource(object()) == "postgresql://localhost:5432/"
+
+
+def test_stale_after_is_emitted_only_when_asked():
+    lines = provenance(fake_catalog(), "2026-08-29T00:00:00+00:00")
+    assert not any(line.startswith("stale_after") for line in lines)
+
+    dated = provenance(fake_catalog(), "2026-08-29T00:00:00+00:00", "2026-09-28")
+    assert "stale_after: 2026-09-28" in dated
 
 
 def demo():

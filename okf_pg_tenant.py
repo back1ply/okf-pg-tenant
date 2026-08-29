@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_TENANT_PATTERN = (
@@ -20,6 +20,7 @@ SKIPPED_KINDS = {
 }
 GEO_TYPES = ("geometry", "geography")
 UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+PRODUCER = "process:okf-pg-tenant"
 
 SQL_SCHEMAS = r"""
 SELECT nspname
@@ -219,7 +220,32 @@ def fetch(conn):
         "database": database,
         "extensions": extensions,
         "skipped": skipped,
+        "resource": source_resource(conn),
     }
+
+
+def source_resource(conn):
+    info = getattr(conn, "info", None)
+    host = getattr(info, "host", None) or "localhost"
+    port = getattr(info, "port", None) or 5432
+    dbname = getattr(info, "dbname", None) or ""
+    return f"postgresql://{host}:{port}/{dbname}"
+
+
+def provenance(catalog, generated_at, stale_after=None):
+    lines = [
+        "status: stable",
+        "sources:",
+        f"  - resource: {catalog['resource']}",
+        f"    id: {catalog['database']}",
+        f"    title: PostgreSQL catalog for {catalog['database']}",
+        "generated:",
+        f"  by: {PRODUCER}",
+        f"  at: {generated_at}",
+    ]
+    if stale_after:
+        lines.append(f"stale_after: {stale_after}")
+    return lines
 
 
 def render_columns(columns, counts=None):
@@ -253,7 +279,7 @@ def render_drift(drift):
     return "\n".join(lines) + "\n"
 
 
-def render_tenant_doc(table, info, replica_ident, tenant_total):
+def render_tenant_doc(table, info, replica_ident, tenant_total, trust=None):
     columns = info["columns"]
     counts = drift_counts(info["drift"])
     geo = [c["name"] for c in columns if any(g in c["type"] for g in GEO_TYPES)]
@@ -265,6 +291,9 @@ def render_tenant_doc(table, info, replica_ident, tenant_total):
             "type: Postgres Table (multi-tenant)",
             f"title: {table}",
             'description: ""',
+        ]
+        + list(trust or [])
+        + [
             "tenancy:",
             "  pattern: schema-per-tenant",
             f"  schemas: {info['schema_count']}",
@@ -306,7 +335,7 @@ def render_tenant_doc(table, info, replica_ident, tenant_total):
     return front + "\n".join(body)
 
 
-def render_global_doc(schema, table, columns, replica_ident):
+def render_global_doc(schema, table, columns, replica_ident, trust=None):
     has_pk = any(c["pk"] for c in columns)
     geo = [c["name"] for c in columns if any(g in c["type"] for g in GEO_TYPES)]
     front = "\n".join(
@@ -316,6 +345,9 @@ def render_global_doc(schema, table, columns, replica_ident):
             f"title: {schema}.{table}",
             'description: ""',
             f"schema: {schema}",
+        ]
+        + list(trust or [])
+        + [
             "cdc:",
             f"  replica_identity: {REPLICA_IDENTITY.get(replica_ident, replica_ident)}",
             f"  primary_key: {str(has_pk).lower()}",
@@ -361,7 +393,7 @@ def render_skipped(skipped):
     )
 
 
-def render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern):
+def render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern, trust=None):
     ext = set(catalog["extensions"])
     checks = [
         ("read the catalog via pg_catalog (no table grants needed)", True, ""),
@@ -376,13 +408,17 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern):
             "not superuser - normal on managed Postgres, not an error",
         ),
     ]
-    lines = [
-        "---",
-        "type: Diagnostics",
-        "title: Producer diagnostics",
-        'description: "What this run could and could not read."',
-        f"timestamp: {datetime.now(timezone.utc).isoformat()}",
-        "---",
+    lines = (
+        [
+            "---",
+            "type: Diagnostics",
+            "title: Producer diagnostics",
+            'description: "What this run could and could not read."',
+            f"timestamp: {datetime.now(timezone.utc).isoformat()}",
+        ]
+        + list(trust or [])
+        + [
+            "---",
         "",
         "# Producer diagnostics",
         "",
@@ -392,10 +428,11 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern):
         f"- schemas seen: {len(catalog['schemas'])}",
         f"- tenant schemas matched: {len(tenant_schemas)}",
         f"- tenant schemas with no tables: {len(empty_tenants)}",
-        "",
-        "## Capabilities",
-        "",
-    ]
+            "",
+            "## Capabilities",
+            "",
+        ]
+    )
     for label, ok, note in checks:
         mark = "OK" if ok else "MISSING"
         suffix = f" ({note})" if not ok and note else ""
@@ -469,9 +506,10 @@ def partition_tables(columns, tenant_set):
     return per_tenant_table, global_tables
 
 
-def build_bundle(catalog, out, pattern, title):
+def build_bundle(catalog, out, pattern, title, stale_after=None):
     tenant_schemas, _shared = classify_schemas(catalog["schemas"], pattern)
     tenant_set = set(tenant_schemas)
+    trust = provenance(catalog, datetime.now(timezone.utc).isoformat(), stale_after)
 
     per_table, global_tables = partition_tables(catalog["columns"], tenant_set)
     collapsed = collapse(per_table)
@@ -490,21 +528,21 @@ def build_bundle(catalog, out, pattern, title):
     for table, info in collapsed.items():
         ident = catalog["replica"][(info["reference_schema"], table)]
         (out / "tenant" / f"{tenant_files[table]}.md").write_text(
-            render_tenant_doc(table, info, ident, len(tenant_schemas)),
+            render_tenant_doc(table, info, ident, len(tenant_schemas), trust),
             encoding="utf-8",
         )
 
     for (schema, table), columns in sorted(global_tables.items()):
         ident = catalog["replica"][(schema, table)]
         (out / "global" / f"{global_files[f'{schema}.{table}']}.md").write_text(
-            render_global_doc(schema, table, columns, ident), encoding="utf-8"
+            render_global_doc(schema, table, columns, ident, trust), encoding="utf-8"
         )
 
     (out / "index.md").write_text(
         render_index(title, collapsed, tenant_files, global_files), encoding="utf-8"
     )
     (out / "_diagnostics.md").write_text(
-        render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern),
+        render_diagnostics(catalog, tenant_schemas, empty_tenants, pattern, trust),
         encoding="utf-8",
     )
     return {
@@ -534,6 +572,12 @@ def main(argv=None):
         help="regex matching tenant schema names (default: UUID)",
     )
     parser.add_argument("--title", default=None, help="bundle title for index.md")
+    parser.add_argument(
+        "--stale-after-days",
+        type=int,
+        default=None,
+        help="emit an OKF v0.2 stale_after date this many days out (default: omitted)",
+    )
     args = parser.parse_args(argv)
 
     if not args.dsn:
@@ -545,7 +589,11 @@ def main(argv=None):
         catalog = fetch(conn)
 
     title = args.title or f"{catalog['database']} knowledge bundle"
-    stats = build_bundle(catalog, args.out, args.tenant_pattern, title)
+    stale_after = None
+    if args.stale_after_days is not None:
+        expiry = datetime.now(timezone.utc) + timedelta(days=args.stale_after_days)
+        stale_after = expiry.date().isoformat()
+    stats = build_bundle(catalog, args.out, args.tenant_pattern, title, stale_after)
 
     if stats["tenant_schemas"] == 0:
         print(
