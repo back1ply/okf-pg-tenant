@@ -1,22 +1,54 @@
+<div align="center">
+
 # okf-pg-tenant
 
-An [Open Knowledge Format](https://okf.md) producer for **real** production PostgreSQL:
-multi-tenant, undocumented, and managed.
+*An [Open Knowledge Format](https://okf.md) producer for **real** production PostgreSQL — multi-tenant, undocumented, managed*
 
-Existing OKF Postgres producers assume a database you own, with one schema and
-`COMMENT ON` everywhere. Production SaaS databases are usually neither.
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3c873a?style=flat-square)
+![Dependencies](https://img.shields.io/badge/dependencies-psycopg-blue?style=flat-square)
 
-## What it does differently
+[Why](#why) • [Features](#features) • [Install](#install) • [Quick Start](#quick-start) • [Try It](#try-it) • [Evidence](#evidence) • [Limits](#known-limits)
 
-### 1. Collapses schema-per-tenant databases
+</div>
 
-Many B2B SaaS products give every customer their own schema. A database with 800
-tenant schemas and 12 tables each has 9,600 physical tables — and roughly 12
-distinct ones. A naive producer emits 9,600 near-identical markdown files and an
-index nobody can read.
+Existing OKF Postgres producers assume a database you own: one schema, and `COMMENT ON`
+everywhere. Production SaaS databases are usually neither.
 
-`okf-pg-tenant` emits **one document per logical table**, with the tenant count in
-frontmatter:
+> [!NOTE]
+> **OKF** is a specification for representing structured metadata as markdown files with YAML
+> frontmatter. This project implements OKF v0.1.
+
+## Why
+
+Many B2B SaaS products give every customer their own schema. A database with **800 tenants and
+12 tables** has 9,600 physical tables — and roughly 12 distinct ones.
+
+```
+A naive producer                    okf-pg-tenant
+─────────────────                   ─────────────
+9,600 markdown files                12 markdown files
+one per tenant, per table           one per LOGICAL table
+an index nobody can read            tenant count in frontmatter
+drift invisible                     stragglers named
+```
+
+## Features
+
+- **Collapses schema-per-tenant** — one document per logical table, not per tenant. The
+  tenant-schema pattern is a regex (`--tenant-pattern`), defaulting to UUID.
+- **Detects cross-tenant drift** — compares every tenant against the majority structure and
+  names the stragglers, by column name/type/nullability **as a set**, never by column order.
+- **Runs on managed Postgres, least privilege** — reads `pg_catalog`, not `information_schema`.
+  No superuser, no table grants, nothing written to the database.
+- **Says what it could not read** — every bundle ships `_diagnostics.md` naming missing
+  capabilities *and counting the relations it chose not to document*.
+- **Treats table names as untrusted input** — a name is whatever someone typed inside
+  `CREATE TABLE "..."`, and Postgres permits `..` and `/`.
+
+## What each one means
+
+### Collapses schema-per-tenant
 
 ```yaml
 tenancy:
@@ -28,18 +60,11 @@ tenancy:
   reference_schema: <the schema the columns were read from>
 ```
 
-`absent_from` matters: a table that exists in only some tenants is a mid-rollout
-migration, and a producer that only prints "797 schemas" hides that. The body says
-it in words too — *present in 797 of 800 tenant schema(s)*.
+`absent_from` matters: a table present in only some tenants is a mid-rollout migration, and a
+producer that prints only "797 schemas" hides that. The body says it in words too — *present in
+797 of 800 tenant schema(s)*.
 
-The tenant-schema pattern is a regex (`--tenant-pattern`). It defaults to UUID
-because that is the common convention, but any naming scheme works.
-
-### 2. Detects cross-tenant schema drift
-
-Collapsing assumes all tenants share a structure. In practice they don't —
-migrations stall, some tenants are mid-rollout. The producer compares every
-tenant schema against the majority structure and reports the stragglers by name:
+### Detects cross-tenant drift
 
 ```markdown
 ## Tenant drift
@@ -49,25 +74,18 @@ tenant schema against the majority structure and reports the stragglers by name:
 - `a1c3e5f7-5555-…` - missing `amount`
 ```
 
-Comparison is by **column name, type and nullability as a set** — not by column
-order. A tenant where a column was dropped and re-added has a different physical
-column order but identical structure, and is correctly *not* reported as drift.
-That case is covered by a test, because it is exactly the tenant population the
-feature exists to inspect.
+Comparison is by **column name, type and nullability as a set** — not by order. A tenant where a
+column was dropped and re-added has a different physical column order and an identical
+structure, and is correctly *not* drift. That case has its own test, because it is exactly the
+tenant population the feature exists to inspect.
 
-### 3. Works on managed Postgres, with least privilege
+### Runs on managed Postgres, least privilege
 
-Structure is read from `pg_catalog`, not `information_schema`.
-`information_schema` filters rows by privilege, so a least-privilege account gets
-a silently incomplete picture. `pg_catalog` does not, and it is readable on Cloud
-SQL, RDS and friends without any table grants.
+`information_schema` filters rows by privilege, so a least-privilege account gets a silently
+incomplete picture. `pg_catalog` does not, and it is readable on Cloud SQL, RDS and friends with
+no table grants at all.
 
-No superuser required. Nothing is written to the database. Every query is a
-catalog read.
-
-### 4. Says what it could not read
-
-Every bundle ships a `_diagnostics.md`:
+### Says what it could not read
 
 ```markdown
 ## Capabilities
@@ -77,12 +95,11 @@ Every bundle ships a `_diagnostics.md`:
 - **OK** - connected as superuser
 ```
 
-A missing capability is stated, not silently skipped. An empty tenant schema is
-reported as empty — and `pg_catalog` guarantees that means *empty*, not *denied*.
+A missing capability is stated, not silently skipped. An empty tenant schema is reported as
+empty — and `pg_catalog` guarantees that means *empty*, not *denied*.
 
-The same file counts every relation the producer chose **not** to document, so
-"drift: 0" can never quietly mean "drift: 0 among the things I bothered to look
-at":
+The same file counts every relation the producer chose **not** to document, so `drift: 0` can
+never quietly mean "drift: 0 among the things I bothered to look at":
 
 ```markdown
 | Kind | Objects | Schemas |
@@ -91,19 +108,31 @@ at":
 | view | 1500 | 500 |
 ```
 
-1500 views over 500 schemas is 3 each — even. 970 foreign tables over 498 schemas
-is not a whole multiple, so those are spread unevenly: real drift, in a relation
-kind v0.1 does not document. Reporting the counts is what lets you see it.
+1500 views over 500 schemas is 3 each — even. 970 foreign tables over 498 schemas is not a whole
+multiple, so those are spread unevenly: real drift, in a relation kind v0.1 does not document.
+Reporting the counts is what lets you see it.
+
+### Treats table names as untrusted input
+
+Writing `bundle/tenant/<table>.md` straight from the catalog would let a table named
+`../../evil` escape the output directory. Names are sanitised to `[A-Za-z0-9._-]` with leading
+dots stripped, and two names that sanitise to the same filename raise an error naming both
+rather than one silently overwriting the other.
+
+> [!TIP]
+> Static analysis will not catch this class for you. `semgrep` with 1,115 Python and
+> security-audit rules reports zero findings on the vulnerable pattern — a database column is
+> not a taint source those rules model.
 
 ## Install
 
 ```bash
-pip install psycopg[binary]
+pip install "psycopg[binary]"
 ```
 
-Single-file, no other dependencies. Python 3.9+.
+Single file, no other dependencies, Python 3.9+.
 
-## Use
+## Quick Start
 
 ```bash
 python okf_pg_tenant.py --dsn "postgresql://user@host:5432/db" --out ./bundle
@@ -114,19 +143,19 @@ python okf_pg_tenant.py --dsn "postgresql://user@host:5432/db" --out ./bundle
 | `--dsn` | `$DATABASE_URL` | libpq connection string |
 | `--out` | `okf-bundle` | output directory |
 | `--tenant-pattern` | UUID regex | which schemas are tenants |
-| `--title` | `<db> knowledge bundle` | index.md heading |
-
-Output:
+| `--title` | `<db> knowledge bundle` | `index.md` heading |
 
 ```
 bundle/
 ├── index.md            no frontmatter, per OKF spec
-├── tenant/<table>.md   one per logical table
-├── global/<schema>.<table>.md
-└── _diagnostics.md
+├── tenant/
+│   └── <table>.md      one per logical table
+├── global/
+│   └── <schema>.<table>.md
+└── _diagnostics.md     what this run could not read
 ```
 
-## Try it
+## Try It
 
 Needs Docker.
 
@@ -137,8 +166,8 @@ docker exec -i okf-demo-pg psql -U postgres -d saas -v ON_ERROR_STOP=1 -f - < de
 python okf_pg_tenant.py --dsn "postgresql://postgres:demo@127.0.0.1:55432/saas" --out demo-bundle
 ```
 
-The seed builds six tenant schemas: four healthy, one with a dropped-and-re-added
-column (must **not** count as drift), one genuinely drifted, one empty. Output:
+The seed builds six tenant schemas: four healthy, one with a dropped-and-re-added column (must
+**not** count as drift), one genuinely drifted, one empty.
 
 ```
 12 physical tables in 6 tenant schemas -> 2 tenant docs + 2 global docs
@@ -148,66 +177,49 @@ empty tenant schemas: 1
 
 Clean up with `docker rm -f okf-demo-pg`.
 
-## Tests
+## Evidence
 
 ```bash
-python test_okf_pg_tenant.py
+python test_okf_pg_tenant.py    # 15 tests, plain asserts, no framework, no database
+python mutants.py               # 10 deliberate bugs, all must be caught
 ```
 
-15 tests, plain asserts, no framework, no database needed.
+**Coverage is 83%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
+the `__main__` guard. Every line that decides anything is covered; what is not covered is the
+database and CLI shell, proven by running the tool against a real database rather than by
+feeding a mock cursor its own answers back.
 
-Line coverage is 83%, and the uncovered lines are exactly three things:
-`fetch()`, `main()`, and the `__main__` guard. Every line that decides anything
-is covered; what is not covered is the database and CLI shell. Those are proven
-by running the tool against a real database, not by feeding a mock cursor its
-own answers back.
+**The suite is mutation-checked.** `mutants.py` introduces ten deliberate bugs one at a time —
+the reference group picked by rarest signature instead of most common, `signature` ignoring
+nullability, `absent_from` adding instead of subtracting, filename sanitising disabled,
+collision detection disabled, and others. It restores the source afterwards and exits nonzero if
+any survives. All ten are caught.
 
-The suite is mutation-checked. Reproduce it:
-
-```bash
-python mutants.py
-```
-
-Ten deliberate bugs are introduced one at a time
-(reference group picked by rarest signature instead of most common, `signature`
-ignoring nullability, `absent_from` adding instead of subtracting, filename
-sanitising disabled, collision detection disabled, and others). The script restores the
-source afterwards and exits nonzero if any bug survives. All ten are caught.
-A test suite that has never been seen failing is not evidence.
-
-### 5. Treats table names as untrusted input
-
-A table name is whatever someone typed inside `CREATE TABLE "..."`, and Postgres
-permits `/`, `..`, and worse. Writing `bundle/tenant/<table>.md` directly would
-let a table named `../../evil` escape the output directory. Names are sanitised
-to `[A-Za-z0-9._-]` with leading dots stripped, and two names that sanitise to
-the same filename raise an error naming both rather than one silently
-overwriting the other.
+> [!IMPORTANT]
+> A test suite that has never been seen failing is not evidence. That is what `mutants.py` is
+> for, and why it ships in the repo instead of being a claim in this file.
 
 ## Known limits
 
-- **Descriptions are empty.** Real product databases rarely carry `COMMENT ON`.
-  The useful descriptions usually live in a dbt project or in migration SQL.
-  Reading those is the next module, not this one.
-- **Drift names tenant schemas in the output.** That is the point of the feature,
-  but if schema names are sensitive in your context, treat the bundle accordingly.
-- **Only ordinary tables are documented** (`relkind = 'r'`). Views, materialized
-  views, foreign tables and partitioned tables are counted and reported in
-  `_diagnostics.md`, but not documented and **not drift-checked**. The report
-  makes uneven ones visible: if a kind's object count is not a whole multiple of
-  its schema count, it is spread unevenly, and that is drift this version cannot
-  see. Documenting them is v0.2.
-- **A table absent from some tenants is counted, not itemised.** You get
-  `absent_from: 3`, not the three schema names. Naming them is v0.2.
-- **No usage statistics yet.** `pg_stat_user_tables` and `pg_stat_statements` would
-  show which tables are actually read and how they are really joined. Planned.
+- **Descriptions are empty.** Real product databases rarely carry `COMMENT ON`. The useful
+  descriptions usually live in a dbt project or in migration SQL. Reading those is the next
+  module, not this one.
+- **Only ordinary tables are documented** (`relkind = 'r'`). Views, materialized views, foreign
+  tables and partitioned tables are counted in `_diagnostics.md` but **not drift-checked**.
+- **A table absent from some tenants is counted, not itemised.** You get `absent_from: 3`, not
+  the three schema names.
+- **Drift names tenant schemas in the output.** That is the point of the feature, but if schema
+  names are sensitive in your context, treat the bundle accordingly.
+- **No usage statistics yet.** `pg_stat_user_tables` and `pg_stat_statements` would show which
+  tables are actually read and how they are really joined.
 
 ## Roadmap
 
-1. Descriptions merged from a dbt project's `schema.yml`.
-2. Usage and access statistics from `pg_stat_*`.
-3. MySQL.
+1. Descriptions merged from a dbt project's `schema.yml`
+2. Usage and access statistics from `pg_stat_*`
+3. Views and foreign tables documented and drift-checked
+4. MySQL
 
 ## License
 
-MIT.
+MIT
