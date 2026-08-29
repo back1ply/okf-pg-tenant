@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 
 from okf_pg_tenant import (
+    Catalog,
     DEFAULT_TENANT_PATTERN,
     Run,
     Settings,
@@ -128,17 +129,15 @@ def test_table_absent_from_some_tenants_is_reported():
 
 
 def test_diagnostics_reports_skipped_object_kinds():
-    catalog = {
-        "database": "saas",
-        "version": "17.10",
-        "schemas": [T1, T2, "meta"],
-        "extensions": [],
-        "is_superuser": "off",
-        "skipped": [
+    catalog = Catalog(
+        database="saas",
+        version="17.10",
+        schemas=[T1, T2, "meta"],
+        skipped=[
             {"kind": "v", "objects": 1500, "schemas": 500},
             {"kind": "f", "objects": 970, "schemas": 498},
         ],
-    }
+    )
     doc = render_diagnostics(catalog, [T1, T2], [], run())
     assert "| view | 1500 | 500 |" in doc
     assert "| foreign table | 970 | 498 |" in doc
@@ -147,14 +146,12 @@ def test_diagnostics_reports_skipped_object_kinds():
 
 
 def test_diagnostics_says_nothing_was_skipped_when_nothing_was():
-    catalog = {
-        "database": "saas",
-        "version": "17.10",
-        "schemas": [T1],
-        "extensions": ["pg_stat_statements"],
-        "is_superuser": "off",
-        "skipped": [],
-    }
+    catalog = Catalog(
+        database="saas",
+        version="17.10",
+        schemas=[T1],
+        extensions=["pg_stat_statements"],
+    )
     doc = render_diagnostics(catalog, [T1], [], run())
     assert "None. Every relation in scope is an ordinary table." in doc
     assert "OK** - pg_stat_statements available" in doc
@@ -238,21 +235,21 @@ def test_index_omits_sections_that_have_no_entries():
 
 def fake_catalog():
     invoice = reference_columns()
-    return {
-        "schemas": [T1, T2, T3, "meta"],
-        "columns": {
+    return Catalog(
+        schemas=[T1, T2, T3, "meta"],
+        columns={
             (T1, "invoice"): invoice,
             (T2, "invoice"): invoice,
             ("meta", "tenant"): [col("id", "uuid", 1, notnull=True, pk=True)],
         },
-        "replica": {(T1, "invoice"): "f", (T2, "invoice"): "f", ("meta", "tenant"): "d"},
-        "version": "17.10",
-        "is_superuser": "off",
-        "database": "saas",
-        "extensions": [],
-        "skipped": [],
-        "resource": "postgresql://db.example:5432/saas",
-    }
+        replica={(T1, "invoice"): "f", (T2, "invoice"): "f", ("meta", "tenant"): "d"},
+        version="17.10",
+        is_superuser="off",
+        database="saas",
+        extensions=[],
+        skipped=[],
+        resource="postgresql://db.example:5432/saas",
+    )
 
 
 def test_build_bundle_writes_a_complete_okf_bundle():

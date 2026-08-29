@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -69,6 +69,35 @@ SELECT current_setting('server_version'),
 """
 
 SQL_EXTENSIONS = "SELECT extname FROM pg_extension ORDER BY extname"
+
+
+@dataclass
+class Catalog:
+    database: str = ""
+    version: str = ""
+    is_superuser: str = "off"
+    resource: str = ""
+    schemas: list = field(default_factory=list)
+    columns: dict = field(default_factory=dict)
+    replica: dict = field(default_factory=dict)
+    extensions: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+
+
+@dataclass
+class Run:
+    trust: list
+    pattern: str
+    tenant_total: int = 0
+
+
+@dataclass
+class Settings:
+    out: str
+    pattern: str
+    title: str
+    stale_after: str = ""
+
 
 
 def classify_schemas(schemas, pattern):
@@ -212,17 +241,17 @@ def fetch(conn):
         cur.execute(SQL_EXTENSIONS)
         extensions = [row[0] for row in cur.fetchall()]
 
-    return {
-        "schemas": schemas,
-        "columns": dict(columns),
-        "replica": replica,
-        "version": version,
-        "is_superuser": is_superuser,
-        "database": database,
-        "extensions": extensions,
-        "skipped": skipped,
-        "resource": source_resource(conn),
-    }
+    return Catalog(
+        database=database,
+        version=version,
+        is_superuser=is_superuser,
+        resource=source_resource(conn),
+        schemas=schemas,
+        columns=dict(columns),
+        replica=replica,
+        extensions=extensions,
+        skipped=skipped,
+    )
 
 
 def source_resource(conn):
@@ -233,28 +262,13 @@ def source_resource(conn):
     return f"postgresql://{host}:{port}/{dbname}"
 
 
-@dataclass
-class Run:
-    trust: list
-    pattern: str
-    tenant_total: int = 0
-
-
-@dataclass
-class Settings:
-    out: str
-    pattern: str
-    title: str
-    stale_after: str = ""
-
-
 def provenance(catalog, generated_at, stale_after=None):
     lines = [
         "status: stable",
         "sources:",
-        f"  - resource: {catalog['resource']}",
-        f"    id: {catalog['database']}",
-        f"    title: PostgreSQL catalog for {catalog['database']}",
+        f"  - resource: {catalog.resource}",
+        f"    id: {catalog.database}",
+        f"    title: PostgreSQL catalog for {catalog.database}",
         "generated:",
         f"  by: {PRODUCER}",
         f"  at: {generated_at}",
@@ -416,7 +430,7 @@ def render_skipped(skipped):
 def render_diagnostics(catalog, tenant_schemas, empty_tenants, run):
     pattern = run.pattern
     trust = run.trust
-    ext = set(catalog["extensions"])
+    ext = set(catalog.extensions)
     checks = [
         ("read the catalog via pg_catalog (no table grants needed)", True, ""),
         (
@@ -426,7 +440,7 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, run):
         ),
         (
             "connected as superuser",
-            catalog["is_superuser"] == "on",
+            catalog.is_superuser == "on",
             "not superuser - normal on managed Postgres, not an error",
         ),
     ]
@@ -444,10 +458,10 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, run):
         "",
         "# Producer diagnostics",
         "",
-        f"- database: `{catalog['database']}`",
-        f"- server version: `{catalog['version']}`",
+        f"- database: `{catalog.database}`",
+        f"- server version: `{catalog.version}`",
         f"- tenant pattern: `{pattern}`",
-        f"- schemas seen: {len(catalog['schemas'])}",
+        f"- schemas seen: {len(catalog.schemas)}",
         f"- tenant schemas matched: {len(tenant_schemas)}",
         f"- tenant schemas with no tables: {len(empty_tenants)}",
             "",
@@ -460,7 +474,7 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, run):
         suffix = f" ({note})" if not ok and note else ""
         lines.append(f"- **{mark}** - {label}{suffix}")
     lines += ["", "## Objects not documented", ""]
-    lines += render_skipped(catalog.get("skipped") or [])
+    lines += render_skipped(catalog.skipped)
     lines += [
         "",
         "## Read this before trusting the bundle",
@@ -530,7 +544,7 @@ def partition_tables(columns, tenant_set):
 
 def build_bundle(catalog, settings):
     out, pattern, title = settings.out, settings.pattern, settings.title
-    tenant_schemas, _shared = classify_schemas(catalog["schemas"], pattern)
+    tenant_schemas, _shared = classify_schemas(catalog.schemas, pattern)
     tenant_set = set(tenant_schemas)
     run = Run(
         trust=provenance(
@@ -540,9 +554,9 @@ def build_bundle(catalog, settings):
         tenant_total=len(tenant_schemas),
     )
 
-    per_table, global_tables = partition_tables(catalog["columns"], tenant_set)
+    per_table, global_tables = partition_tables(catalog.columns, tenant_set)
     collapsed = collapse(per_table)
-    non_empty = {key[0] for key in catalog["columns"] if key[0] in tenant_set}
+    non_empty = {key[0] for key in catalog.columns if key[0] in tenant_set}
     empty_tenants = sorted(tenant_set - non_empty)
 
     out = Path(out)
@@ -555,7 +569,7 @@ def build_bundle(catalog, settings):
     )
 
     for table, info in collapsed.items():
-        ident = catalog["replica"][(info["reference_schema"], table)]
+        ident = catalog.replica[(info["reference_schema"], table)]
         (out / "tenant" / f"{tenant_files[table]}.md").write_text(
             render_tenant_doc(table, info, ident, run),
             encoding="utf-8",
@@ -563,7 +577,7 @@ def build_bundle(catalog, settings):
 
     for target, columns in sorted(global_tables.items()):
         schema, table = target
-        ident = catalog["replica"][target]
+        ident = catalog.replica[target]
         (out / "global" / f"{global_files[f'{schema}.{table}']}.md").write_text(
             render_global_doc(target, columns, ident, run), encoding="utf-8"
         )
@@ -580,12 +594,12 @@ def build_bundle(catalog, settings):
         "global_docs": len(global_tables),
         "tenant_schemas": len(tenant_schemas),
         "empty_tenants": len(empty_tenants),
-        "source_tables": len(catalog["columns"]),
+        "source_tables": len(catalog.columns),
         "drifting": sum(len(i["drift"]) for i in collapsed.values()),
     }
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
         prog="okf-pg-tenant",
         description="Produce an OKF bundle from a multi-tenant PostgreSQL database.",
@@ -608,31 +622,23 @@ def main(argv=None):
         default=None,
         help="emit an OKF v0.2 stale_after date this many days out (default: omitted)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    if not args.dsn:
-        parser.error("no connection string: pass --dsn or set DATABASE_URL")
 
-    import psycopg
-
-    with psycopg.connect(args.dsn) as conn:
-        catalog = fetch(conn)
-
-    title = args.title or f"{catalog['database']} knowledge bundle"
+def settings_from(args, catalog):
     stale_after = ""
     if args.stale_after_days is not None:
         expiry = datetime.now(timezone.utc) + timedelta(days=args.stale_after_days)
         stale_after = expiry.date().isoformat()
-    stats = build_bundle(
-        catalog,
-        Settings(
-            out=args.out,
-            pattern=args.tenant_pattern,
-            title=title,
-            stale_after=stale_after,
-        ),
+    return Settings(
+        out=args.out,
+        pattern=args.tenant_pattern,
+        title=args.title or f"{catalog.database} knowledge bundle",
+        stale_after=stale_after,
     )
 
+
+def report(stats, args):
     if stats["tenant_schemas"] == 0:
         print(
             f"WARNING: no schema matched {args.tenant_pattern!r}. "
@@ -648,6 +654,21 @@ def main(argv=None):
     print(f"drift: {stats['drifting']} schema(s) differ from their reference")
     print(f"empty tenant schemas: {stats['empty_tenants']}")
     print(f"bundle: {args.out}")
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.dsn:
+        parser.error("no connection string: pass --dsn or set DATABASE_URL")
+
+    import psycopg
+
+    with psycopg.connect(args.dsn) as conn:
+        catalog = fetch(conn)
+
+    stats = build_bundle(catalog, settings_from(args, catalog))
+    report(stats, args)
     return 0
 
 
