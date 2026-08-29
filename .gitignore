@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 demo-bundle/
 okf-bundle/
+ci-bundle/
+v02-check/
 dist/
 build/
 *.egg-info/

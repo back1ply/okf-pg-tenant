@@ -4,6 +4,7 @@
 
 *An [Open Knowledge Format](https://okf.md) producer for **real** production PostgreSQL — multi-tenant, undocumented, managed*
 
+[![CI](https://img.shields.io/github/actions/workflow/status/back1ply/okf-pg-tenant/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/back1ply/okf-pg-tenant/actions)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3c873a?style=flat-square)
 ![Dependencies](https://img.shields.io/badge/dependencies-psycopg-blue?style=flat-square)
@@ -156,15 +157,27 @@ rather than one silently overwriting the other.
 ## Install
 
 ```bash
-pip install "psycopg[binary]"
+pip install git+https://github.com/back1ply/okf-pg-tenant
 ```
 
-Single file, no other dependencies, Python 3.9+.
+That installs an `okf-pg-tenant` command. Or clone and run the single file directly, which needs
+only `pip install "psycopg[binary]"` — there are no other dependencies.
+
+> [!TIP]
+> On Windows machines with Smart App Control, the installed `.exe` launcher is unsigned and gets
+> blocked. `python -m okf_pg_tenant` is the same entry point and is not affected.
+
+Python 3.9+. CI runs the suite on 3.9, 3.12 and 3.13, so the floor is proven rather than
+assumed — the code itself needs only 3.7.
 
 ## Quick Start
 
 ```bash
-python okf_pg_tenant.py --dsn "postgresql://user@host:5432/db" --out ./bundle
+okf-pg-tenant --dsn "postgresql://user@host:5432/db" --out ./bundle
+
+# equivalents, if you cloned instead of installing
+python -m okf_pg_tenant --dsn "..." --out ./bundle
+python okf_pg_tenant.py --dsn "..." --out ./bundle
 ```
 
 | Flag | Default | Meaning |
@@ -193,7 +206,7 @@ Needs Docker.
 docker run -d --name okf-demo-pg -e POSTGRES_PASSWORD=demo -e POSTGRES_DB=saas \
   -p 55432:5432 postgres:16-alpine
 docker exec -i okf-demo-pg psql -U postgres -d saas -v ON_ERROR_STOP=1 -f - < demo/seed.sql
-python okf_pg_tenant.py --dsn "postgresql://postgres:demo@127.0.0.1:55432/saas" --out demo-bundle
+okf-pg-tenant --dsn "postgresql://postgres:demo@127.0.0.1:55432/saas" --out demo-bundle
 ```
 
 The seed builds six tenant schemas: four healthy, one with a dropped-and-re-added column (must

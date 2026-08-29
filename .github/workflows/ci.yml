@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The version floor is a claim until something runs it. vermin puts the real
+    # floor at 3.7; 3.9 is what the project supports, so 3.9 is what gets proven.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Tests
+        run: python test_okf_pg_tenant.py
+
+      # Not decoration. A green suite says the tests ran, not that they check
+      # anything; this says thirteen deliberate bugs were each caught. It exits
+      # nonzero if any survives, and restores the source either way.
+      - name: Mutation gate
+        run: python mutants.py
+
+      - name: Package installs and the console script exists
+        run: |
+          python -m pip install --quiet .
+          okf-pg-tenant --help
+
+  end-to-end:
+    # The unit suite never touches a database by design, so nothing above proves
+    # the tool works against real Postgres. This renders the demo seed and checks
+    # the collapse arithmetic in the output.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: demo
+          POSTGRES_DB: saas
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --quiet . pyyaml
+
+      - name: Seed the demo database
+        run: psql "postgresql://postgres:demo@localhost:5432/saas" -v ON_ERROR_STOP=1 -f demo/seed.sql
+
+      - name: Produce a bundle
+        run: okf-pg-tenant --dsn "postgresql://postgres:demo@localhost:5432/saas" --out ci-bundle
+
+      - name: Check the bundle is what it claims
+        run: |
+          python - <<'PY'
+          import pathlib, sys, yaml
+
+          bundle = pathlib.Path("ci-bundle")
+          expected = {
+              "index.md",
+              "_diagnostics.md",
+              "tenant/invoice.md",
+              "tenant/subscription.md",
+          }
+          missing = [p for p in expected if not (bundle / p).exists()]
+          if missing:
+              sys.exit(f"missing from the bundle: {missing}")
+
+          doc = (bundle / "tenant/invoice.md").read_text(encoding="utf-8")
+          front = yaml.safe_load(doc.split("---")[1])
+
+          # The seed builds six tenant schemas: five hold invoice, one is empty,
+          # and one of the five has a column dropped. Those numbers are the point
+          # of the tool, so the run asserts them rather than eyeballing output.
+          checks = {
+              "tenancy.schemas": (front["tenancy"]["schemas"], 5),
+              "tenancy.tenant_schemas_total": (front["tenancy"]["tenant_schemas_total"], 6),
+              "tenancy.absent_from": (front["tenancy"]["absent_from"], 1),
+              "tenancy.drift": (front["tenancy"]["drift"], 1),
+              "generated.by": (front["generated"]["by"], "process:okf-pg-tenant"),
+          }
+          for name, (got, want) in checks.items():
+              if got != want:
+                  sys.exit(f"{name}: expected {want!r}, got {got!r}")
+
+          resource = front["sources"][0]["resource"]
+          if "demo" in resource or "@" in resource:
+              sys.exit(f"credentials leaked into sources.resource: {resource!r}")
+
+          print("bundle verified:", {k: v[0] for k, v in checks.items()})
+          PY
+
+      - name: The bundle must not be committed
+        run: git status --porcelain --ignored=no | grep -q . && exit 1 || echo "working tree clean"
