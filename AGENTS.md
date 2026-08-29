@@ -73,9 +73,10 @@ diff -r -I '^ *at: ' -I '^timestamp:' before-bundle after-bundle
 ## Things that look like bugs and are not
 
 - **`index.md` has no YAML frontmatter.** The OKF spec reserves index files and forbids it.
-- **`description: ""` on every document.** Real product databases rarely carry `COMMENT ON`, so
-  there is nothing honest to put there yet. Sourcing descriptions from a dbt project is a
-  planned module, not a gap to paper over with a generated sentence.
+- **`description: ""` on some documents.** `COMMENT ON` is read for tables and columns; where a
+  database carries none the field stays empty. Never generate a sentence to fill it — an
+  invented description is worse than an absent one, and sourcing real ones from a dbt project is
+  a planned module.
 - **`verified:` is never emitted.** OKF v0.2 separates who *produced* a document from who
   *confirmed* it. Nothing here confirms anything, and filling that field is the exact failure
   the split exists to prevent.
@@ -84,6 +85,15 @@ diff -r -I '^ *at: ' -I '^timestamp:' before-bundle after-bundle
 - **Drift compares sets, never column order.** A tenant where a column was dropped and re-added
   has a different physical `attnum` order and an identical structure. Reporting that as drift
   would cry wolf on precisely the mid-migration tenants the feature exists to inspect.
+- **Drift is column drift only.** Defaults, constraints, indexes, foreign keys, identity
+  columns, triggers and RLS are not compared, so two tenants can be reported identical and still
+  behave differently. That is a real limitation, not a hidden one: `NOT_COMPARED` is printed in
+  every drift section, and the frontmatter key is `column_drift`. If you widen the signature,
+  widen that constant and the key with it — a claim the output does not qualify is the failure
+  mode here.
+- **A tie for most common is reported, not resolved.** With no majority the reference is picked
+  alphabetically and `reference_ambiguous: true` is set, because a rename or a new tenant would
+  otherwise silently change what the bundle calls canonical.
 - **`fetch()` and `main()` are the only uncovered lines.** They are the database and CLI shell,
   proven by running the tool against a real database rather than by feeding a mock cursor its
   own answers back. Chasing them would mean asserting that a fake returns what it was told to.

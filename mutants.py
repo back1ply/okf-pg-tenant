@@ -67,6 +67,26 @@ MUTANTS = [
         "return str(getattr(conn, 'info', ''))",
     ),
     (
+        "reference_is_ambiguous never reports a tie",
+        "    return len(sizes) > 1 and sizes[0] == sizes[1]",
+        "    return False",
+    ),
+    (
+        "render_drift drops the not-compared disclosure",
+        'return f"No column drift. All schemas match the reference.\\n\\n{NOT_COMPARED}\\n"',
+        'return "No column drift. All schemas match the reference.\\n"',
+    ),
+    (
+        "column comments are dropped from the rendered table",
+        'described = (comments.get(col["name"]) or "").replace("|", "\\\\|")',
+        'described = ""',
+    ),
+    (
+        "the index stops warning that the inventory is partial",
+        "    if not skipped:\n        return []",
+        "    if True:\n        return []",
+    ),
+    (
         "render_skipped drops the not-drift-checked warning",
         '"so they are **not** covered by the drift check above.",',
         '"",',

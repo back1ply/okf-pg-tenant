@@ -62,6 +62,16 @@ GROUP BY c.relkind
 ORDER BY c.relkind
 """
 
+SQL_COMMENTS = r"""
+SELECT n.nspname, c.relname, d.objsubid, a.attname, d.description
+FROM pg_description d
+JOIN pg_class c ON c.oid = d.objoid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid
+WHERE c.relkind = 'r'
+  AND n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
+"""
+
 SQL_ENV = r"""
 SELECT current_setting('server_version'),
        current_setting('is_superuser'),
@@ -82,6 +92,8 @@ class Catalog:
     replica: dict = field(default_factory=dict)
     extensions: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
+    table_comments: dict = field(default_factory=dict)
+    column_comments: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -89,6 +101,15 @@ class Run:
     trust: list
     pattern: str
     tenant_total: int = 0
+    table_comments: dict = field(default_factory=dict)
+    column_comments: dict = field(default_factory=dict)
+
+    def column_comments_for(self, schema, table):
+        return {
+            column: text
+            for (s, t, column), text in self.column_comments.items()
+            if s == schema and t == table
+        }
 
 
 @dataclass
@@ -161,7 +182,13 @@ def group_by_signature(per_schema):
 
 
 def modal_group(groups):
-    return sorted(groups.items(), key=lambda kv: (-len(kv[1]), min(kv[1])))[0]
+    ranked = sorted(groups.items(), key=lambda kv: (-len(kv[1]), min(kv[1])))
+    return ranked[0]
+
+
+def reference_is_ambiguous(groups):
+    sizes = sorted((len(v) for v in groups.values()), reverse=True)
+    return len(sizes) > 1 and sizes[0] == sizes[1]
 
 
 def drift_entries(groups, modal_sig):
@@ -181,6 +208,8 @@ def collapse_table(per_schema):
     return {
         "columns": per_schema[reference],
         "reference_schema": reference,
+        "reference_ambiguous": reference_is_ambiguous(groups),
+        "variants": len(groups),
         "schema_count": sum(len(v) for v in groups.values()),
         "drift": drift_entries(groups, modal_sig),
     }
@@ -235,6 +264,17 @@ def fetch(conn):
             for kind, count, spread in cur.fetchall()
         ]
 
+        cur.execute(SQL_COMMENTS)
+        table_comments = {}
+        column_comments = {}
+        for schema, table, objsubid, attname, description in cur.fetchall():
+            if not description:
+                continue
+            if objsubid == 0:
+                table_comments[(schema, table)] = description
+            elif attname:
+                column_comments[(schema, table, attname)] = description
+
         cur.execute(SQL_ENV)
         version, is_superuser, database = cur.fetchone()
 
@@ -251,6 +291,8 @@ def fetch(conn):
         replica=replica,
         extensions=extensions,
         skipped=skipped,
+        table_comments=table_comments,
+        column_comments=column_comments,
     )
 
 
@@ -278,9 +320,25 @@ def provenance(catalog, generated_at, stale_after=None):
     return lines
 
 
-def render_columns(columns, counts=None):
+NOT_COMPARED = (
+    "Compared: column name, type, nullability. **Not compared**: defaults, primary keys, "
+    "unique/check/exclusion constraints, indexes, foreign keys, identity/generated columns, "
+    "triggers and row-level security. Two schemas reported identical here can still accept "
+    "different writes and enforce different integrity rules."
+)
+
+
+def yaml_scalar(value):
+    if value is None:
+        return '""'
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def render_columns(columns, counts=None, comments=None):
     counts = counts or {}
-    lines = ["| Column | Type | Null | Notes |", "|---|---|---|---|"]
+    comments = comments or {}
+    lines = ["| Column | Type | Null | Description | Notes |", "|---|---|---|---|---|"]
     for col in sorted(columns, key=lambda c: c["attnum"]):
         notes = []
         if col["pk"]:
@@ -289,13 +347,17 @@ def render_columns(columns, counts=None):
         if hits:
             notes.append(f"differs in {hits} schema(s)")
         null = "NO" if col["notnull"] else "YES"
-        lines.append(f"| {col['name']} | {col['type']} | {null} | {'; '.join(notes)} |")
+        described = (comments.get(col["name"]) or "").replace("|", "\\|")
+        lines.append(
+            f"| {col['name']} | {col['type']} | {null} | {described} | "
+            f"{'; '.join(notes)} |"
+        )
     return "\n".join(lines)
 
 
 def render_drift(drift):
     if not drift:
-        return "No structural drift. All schemas match the reference.\n"
+        return f"No column drift. All schemas match the reference.\n\n{NOT_COMPARED}\n"
     lines = [f"{len(drift)} schema(s) differ from the reference.", ""]
     for entry in drift:
         parts = []
@@ -306,7 +368,7 @@ def render_drift(drift):
         for name, want, got in entry["changed"]:
             parts.append(f"`{name}` is `{got}`, reference has `{want}`")
         lines.append(f"- `{entry['schema']}` - " + "; ".join(parts))
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + f"\n\n{NOT_COMPARED}\n"
 
 
 def render_tenant_doc(table, info, replica_ident, run):
@@ -317,12 +379,14 @@ def render_tenant_doc(table, info, replica_ident, run):
     tenant_total = run.tenant_total
     trust = run.trust
     absent = tenant_total - info["schema_count"]
+    reference = info["reference_schema"]
+    description = run.table_comments.get((reference, table))
     front = "\n".join(
         [
             "---",
             "type: Postgres Table (multi-tenant)",
             f"title: {table}",
-            'description: ""',
+            f"description: {yaml_scalar(description)}",
         ]
         + list(trust or [])
         + [
@@ -331,8 +395,10 @@ def render_tenant_doc(table, info, replica_ident, run):
             f"  schemas: {info['schema_count']}",
             f"  tenant_schemas_total: {tenant_total}",
             f"  absent_from: {absent}",
-            f"  drift: {len(info['drift'])}",
-            f"  reference_schema: {info['reference_schema']}",
+            f"  column_drift: {len(info['drift'])}",
+            f"  variants: {info.get('variants', 1)}",
+            f"  reference_schema: {reference}",
+            f"  reference_ambiguous: {str(bool(info.get('reference_ambiguous'))).lower()}",
             "cdc:",
             f"  replica_identity: {REPLICA_IDENTITY.get(replica_ident, replica_ident)}",
             f"  primary_key: {str(has_pk).lower()}",
@@ -350,12 +416,19 @@ def render_tenant_doc(table, info, replica_ident, run):
         "",
         "## Columns",
         "",
-        render_columns(columns, counts),
+        render_columns(columns, counts, run.column_comments_for(reference, table)),
         "",
-        "## Tenant drift",
+        "## Tenant column drift",
         "",
         render_drift(info["drift"]),
     ]
+    if info.get("reference_ambiguous"):
+        body += [
+            "> **The reference schema is ambiguous.** Two or more structures are tied for",
+            "> most common, so the one above was picked alphabetically and carries no",
+            "> authority. Renaming or adding a tenant can change it without any DDL change.",
+            "",
+        ]
     if geo:
         body += [
             "## Sink warning",
@@ -377,7 +450,7 @@ def render_global_doc(target, columns, replica_ident, run):
             "---",
             "type: Postgres Table",
             f"title: {schema}.{table}",
-            'description: ""',
+            f"description: {yaml_scalar(run.table_comments.get(target))}",
             f"schema: {schema}",
         ]
         + list(trust or [])
@@ -397,7 +470,7 @@ def render_global_doc(target, columns, replica_ident, run):
             "",
             "## Columns",
             "",
-            render_columns(columns),
+            render_columns(columns, None, run.column_comments_for(schema, table)),
             "",
         ]
     )
@@ -510,13 +583,29 @@ def render_global_entries(filenames):
     return lines + [""]
 
 
-def render_index(title, tenant_docs, tenant_files, global_files):
+def render_incomplete_notice(skipped):
+    if not skipped:
+        return []
+    parts = ", ".join(
+        f"{row['objects']} {SKIPPED_KINDS.get(row['kind'], row['kind'])}(s)"
+        for row in skipped
+    )
+    return [
+        "> **This inventory is incomplete.** Only ordinary tables are documented. This",
+        f"> database also holds {parts}, which are neither documented here nor",
+        "> drift-checked. Counts and the uneven-spread test are in",
+        "> [_diagnostics.md](_diagnostics.md).",
+        "",
+    ]
+
+
+def render_index(title, tenant_docs, tenant_files, global_files, skipped=None):
     header = [
         f"# {title}",
         "",
         "Generated by okf-pg-tenant from a PostgreSQL catalog.",
         "",
-    ]
+    ] + render_incomplete_notice(skipped or [])
     footer = [
         "## Meta",
         "",
@@ -552,6 +641,8 @@ def build_bundle(catalog, settings):
         ),
         pattern=pattern,
         tenant_total=len(tenant_schemas),
+        table_comments=catalog.table_comments,
+        column_comments=catalog.column_comments,
     )
 
     per_table, global_tables = partition_tables(catalog.columns, tenant_set)
@@ -583,7 +674,8 @@ def build_bundle(catalog, settings):
         )
 
     (out / "index.md").write_text(
-        render_index(title, collapsed, tenant_files, global_files), encoding="utf-8"
+        render_index(title, collapsed, tenant_files, global_files, catalog.skipped),
+        encoding="utf-8",
     )
     (out / "_diagnostics.md").write_text(
         render_diagnostics(catalog, tenant_schemas, empty_tenants, run),

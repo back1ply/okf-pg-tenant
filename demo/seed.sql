@@ -50,3 +50,21 @@ ALTER TABLE "a1c3e5f7-5555-4aaa-8bbb-000000000005".subscription
     ALTER COLUMN seats TYPE bigint;
 
 CREATE SCHEMA "a1c3e5f7-6666-4aaa-8bbb-000000000006";
+
+COMMENT ON TABLE meta.tenant IS 'One row per customer, the registry every tenant schema maps to.';
+COMMENT ON COLUMN meta.tenant.name IS 'Display name, not unique and not an identifier.';
+
+DO $$
+DECLARE
+    first_tenant text := 'a1c3e5f7-1111-4aaa-8bbb-000000000001';
+BEGIN
+    EXECUTE format('COMMENT ON TABLE %I.invoice IS %L', first_tenant,
+                   'One row per issued invoice for this tenant.');
+    EXECUTE format('COMMENT ON COLUMN %I.invoice.amount IS %L', first_tenant,
+                   'Gross total, tax included.');
+END $$;
+
+-- A view, so the bundle has something it deliberately does not document and the
+-- index has to say so. Real tenant schemas usually carry these.
+CREATE VIEW meta.active_tenant AS
+    SELECT id, name FROM meta.tenant WHERE created_at > now() - interval '90 days';

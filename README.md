@@ -33,15 +33,16 @@ A naive producer                    okf-pg-tenant
 9,600 markdown files                12 markdown files
 one per tenant, per table           one per LOGICAL table
 an index nobody can read            tenant count in frontmatter
-drift invisible                     stragglers named
+drift invisible                     drifting tenants named
 ```
 
 ## Features
 
 - **Collapses schema-per-tenant** — one document per logical table, not per tenant. The
   tenant-schema pattern is a regex (`--tenant-pattern`), defaulting to UUID.
-- **Detects cross-tenant drift** — compares every tenant against the majority structure and
-  names the stragglers, by column name/type/nullability **as a set**, never by column order.
+- **Detects cross-tenant column drift** — compares every tenant against the majority structure
+  and names the stragglers, by column name/type/nullability **as a set**, never by column order.
+  It does not compare defaults, constraints, indexes or foreign keys; every drift section says so.
 - **Runs on managed Postgres, least privilege** — reads `pg_catalog`, not `information_schema`.
   No superuser, no table grants, nothing written to the database.
 - **Says what it could not read** — every bundle ships `_diagnostics.md` naming missing
@@ -69,7 +70,7 @@ tenancy:
 producer that prints only "797 schemas" hides that. The body says it in words too — *present in
 797 of 800 tenant schema(s)*.
 
-### Detects cross-tenant drift
+### Detects cross-tenant column drift
 
 ```markdown
 ## Tenant drift
@@ -83,6 +84,18 @@ Comparison is by **column name, type and nullability as a set** — not by order
 column was dropped and re-added has a different physical column order and an identical
 structure, and is correctly *not* drift. That case has its own test, because it is exactly the
 tenant population the feature exists to inspect.
+
+> [!WARNING]
+> This is **column** drift, not full schema drift. Defaults, primary keys, unique/check
+> constraints, indexes, foreign keys, identity columns, triggers and row-level security are
+> **not** compared. Two tenants reported identical here can still accept different writes and
+> enforce different integrity rules. Every drift section in the output repeats this, so a reader
+> of a single document cannot miss it. Widening the signature is on the roadmap.
+
+When two structures tie for most common there is no majority, so the reference is chosen
+alphabetically and `reference_ambiguous: true` is set — a rename or a new tenant could change it
+with no DDL change at all. The document says so in the body rather than presenting an arbitrary
+pick as canonical.
 
 ### Runs on managed Postgres, least privilege
 
@@ -223,30 +236,36 @@ Clean up with `docker rm -f okf-demo-pg`.
 ## Evidence
 
 ```bash
-python test_okf_pg_tenant.py    # 19 tests, plain asserts, no framework, no database
+python test_okf_pg_tenant.py    # 23 tests, plain asserts, no framework, no database
 python mutants.py               # 10 deliberate bugs, all must be caught
 ```
 
-**Coverage is 83%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
+**Coverage is 81%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
 the `__main__` guard. Every line that decides anything is covered; what is not covered is the
 database and CLI shell, proven by running the tool against a real database rather than by
 feeding a mock cursor its own answers back.
 
-**The suite is mutation-checked.** `mutants.py` introduces thirteen deliberate bugs one at a time —
+**The suite is mutation-checked.** `mutants.py` introduces seventeen deliberate bugs one at a time —
 the reference group picked by rarest signature instead of most common, `signature` ignoring
 nullability, `absent_from` adding instead of subtracting, filename sanitising disabled,
 collision detection disabled, the source URI leaking a password, and others. It restores the source afterwards and exits nonzero if
-any survives. All thirteen are caught.
+any survives. All are caught.
 
 > [!IMPORTANT]
 > A test suite that has never been seen failing is not evidence. That is what `mutants.py` is
 > for, and why it ships in the repo instead of being a claim in this file.
+>
+> Its limit is worth stating plainly: these are **hand-picked** mutants, so they cover the bugs
+> the author thought of, not the space of possible bugs. They raise the floor; they do not
+> survey it. A systematic mutation tool over the pure functions would be strictly better and is
+> on the roadmap.
 
 ## Known limits
 
-- **Descriptions are empty.** Real product databases rarely carry `COMMENT ON`. The useful
-  descriptions usually live in a dbt project or in migration SQL. Reading those is the next
-  module, not this one.
+- **Descriptions come from `COMMENT ON` only.** Table and column comments are read and become
+  the `description` field. Many production databases carry none, in which case the field stays
+  empty — the useful descriptions then live in a dbt project or in migration SQL, and reading
+  those is a separate module.
 - **Only ordinary tables are documented** (`relkind = 'r'`). Views, materialized views, foreign
   tables and partitioned tables are counted in `_diagnostics.md` but **not drift-checked**.
 - **A table absent from some tenants is counted, not itemised.** You get `absent_from: 3`, not
@@ -258,10 +277,12 @@ any survives. All thirteen are caught.
 
 ## Roadmap
 
-1. Descriptions merged from a dbt project's `schema.yml`
-2. Usage and access statistics from `pg_stat_*`
-3. Views and foreign tables documented and drift-checked
-4. MySQL
+1. Widen the drift signature to defaults, constraints, indexes and foreign keys
+2. Views and foreign tables documented and drift-checked, not merely counted
+3. Descriptions merged from a dbt project's `schema.yml` where the database has none
+4. Systematic mutation testing over the pure functions, replacing hand-picked mutants
+5. Usage and access statistics from `pg_stat_*`
+6. MySQL
 
 ## License
 

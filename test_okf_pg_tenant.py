@@ -24,9 +24,10 @@ T3 = "00000000-0000-4000-8000-000000000003"
 T4 = "00000000-0000-4000-8000-000000000004"
 
 
-def run(tenant_total=0, trust=None):
+def run(tenant_total=0, trust=None, table_comments=None, column_comments=None):
     return Run(trust=list(trust or []), pattern=DEFAULT_TENANT_PATTERN,
-               tenant_total=tenant_total)
+               tenant_total=tenant_total, table_comments=table_comments or {},
+               column_comments=column_comments or {})
 
 
 def settings(out):
@@ -113,10 +114,11 @@ def test_tenant_doc_reports_counts_and_sink_safety():
     doc = render_tenant_doc("alert", result["alert"], "f", run(tenant_total=2))
     assert "schemas: 2" in doc
     assert "absent_from: 0" in doc
-    assert "drift: 0" in doc
+    assert "column_drift: 0" in doc
     assert "replica_identity: FULL" in doc
     assert "sink_safe: false" in doc
-    assert "No structural drift" in doc
+    assert "No column drift" in doc
+    assert "**Not compared**" in doc
 
 
 def test_table_absent_from_some_tenants_is_reported():
@@ -333,6 +335,58 @@ def test_stale_after_is_emitted_only_when_asked():
 
     dated = provenance(fake_catalog(), "2026-08-29T00:00:00+00:00", "2026-09-28")
     assert "stale_after: 2026-09-28" in dated
+
+
+def test_drift_section_names_what_it_does_not_compare():
+    dropped = [c for c in reference_columns() if c["name"] != "amount"]
+    result = collapse(
+        {"invoice": {T1: reference_columns(), T2: reference_columns(), T3: dropped}}
+    )
+    doc = render_tenant_doc("invoice", result["invoice"], "d", run(tenant_total=3))
+    for omitted in ("defaults", "constraints", "indexes", "foreign keys", "triggers"):
+        assert omitted in doc, omitted
+    assert "different integrity rules" in doc
+
+
+def test_a_tie_for_most_common_is_reported_as_ambiguous():
+    other = [c for c in reference_columns() if c["name"] != "amount"]
+    tied = collapse({"invoice": {T1: reference_columns(), T2: other}})["invoice"]
+    assert tied["reference_ambiguous"] is True
+    assert tied["variants"] == 2
+    doc = render_tenant_doc("invoice", tied, "d", run(tenant_total=2))
+    assert "reference_ambiguous: true" in doc
+    assert "picked alphabetically and carries no" in doc
+
+    clear = collapse(
+        {"invoice": {T1: reference_columns(), T2: reference_columns(), T3: other}}
+    )["invoice"]
+    assert clear["reference_ambiguous"] is False
+    assert "reference_ambiguous: false" in render_tenant_doc(
+        "invoice", clear, "d", run(tenant_total=3)
+    )
+
+
+def test_comments_become_descriptions():
+    commented = run(
+        tenant_total=2,
+        table_comments={(T1, "invoice"): "One row per completed order."},
+        column_comments={(T1, "invoice", "amount"): "Gross total in cents."},
+    )
+    result = collapse({"invoice": {T1: reference_columns(), T2: reference_columns()}})
+    doc = render_tenant_doc("invoice", result["invoice"], "d", commented)
+    assert 'description: "One row per completed order."' in doc
+    assert "Gross total in cents." in doc
+
+
+def test_index_warns_when_the_inventory_is_partial():
+    docs = {"invoice": {"drift": [], "schema_count": 2}}
+    files = {"invoice": "invoice"}
+    partial = render_index("saas", docs, files, {}, [{"kind": "v", "objects": 9, "schemas": 3}])
+    assert "This inventory is incomplete" in partial
+    assert "9 view(s)" in partial
+
+    complete = render_index("saas", docs, files, {}, [])
+    assert "incomplete" not in complete
 
 
 def demo():
