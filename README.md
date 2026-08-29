@@ -214,7 +214,7 @@ python test_okf_pg_tenant.py    # 19 tests, plain asserts, no framework, no data
 python mutants.py               # 10 deliberate bugs, all must be caught
 ```
 
-**Coverage is 82%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
+**Coverage is 83%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
 the `__main__` guard. Every line that decides anything is covered; what is not covered is the
 database and CLI shell, proven by running the tool against a real database rather than by
 feeding a mock cursor its own answers back.

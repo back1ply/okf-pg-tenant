@@ -3,6 +3,8 @@ from pathlib import Path
 
 from okf_pg_tenant import (
     DEFAULT_TENANT_PATTERN,
+    Run,
+    Settings,
     build_bundle,
     classify_schemas,
     collapse,
@@ -19,6 +21,15 @@ T1 = "00000000-0000-4000-8000-000000000001"
 T2 = "00000000-0000-4000-8000-000000000002"
 T3 = "00000000-0000-4000-8000-000000000003"
 T4 = "00000000-0000-4000-8000-000000000004"
+
+
+def run(tenant_total=0, trust=None):
+    return Run(trust=list(trust or []), pattern=DEFAULT_TENANT_PATTERN,
+               tenant_total=tenant_total)
+
+
+def settings(out):
+    return Settings(out=out, pattern=DEFAULT_TENANT_PATTERN, title="saas")
 
 
 def col(name, coltype, attnum, notnull=False, pk=False):
@@ -98,7 +109,7 @@ def test_majority_wins_as_reference_not_first_seen():
 def test_tenant_doc_reports_counts_and_sink_safety():
     geo = reference_columns() + [col("location", "geometry(Point,4326)", 4)]
     result = collapse({"alert": {T1: geo, T2: geo}})
-    doc = render_tenant_doc("alert", result["alert"], "f", tenant_total=2)
+    doc = render_tenant_doc("alert", result["alert"], "f", run(tenant_total=2))
     assert "schemas: 2" in doc
     assert "absent_from: 0" in doc
     assert "drift: 0" in doc
@@ -109,7 +120,7 @@ def test_tenant_doc_reports_counts_and_sink_safety():
 
 def test_table_absent_from_some_tenants_is_reported():
     result = collapse({"invoice": {T1: reference_columns(), T2: reference_columns()}})
-    doc = render_tenant_doc("invoice", result["invoice"], "d", tenant_total=5)
+    doc = render_tenant_doc("invoice", result["invoice"], "d", run(tenant_total=5))
     assert "schemas: 2" in doc
     assert "tenant_schemas_total: 5" in doc
     assert "absent_from: 3" in doc
@@ -128,7 +139,7 @@ def test_diagnostics_reports_skipped_object_kinds():
             {"kind": "f", "objects": 970, "schemas": 498},
         ],
     }
-    doc = render_diagnostics(catalog, [T1, T2], [], DEFAULT_TENANT_PATTERN)
+    doc = render_diagnostics(catalog, [T1, T2], [], run())
     assert "| view | 1500 | 500 |" in doc
     assert "| foreign table | 970 | 498 |" in doc
     assert "not** covered by the drift check" in doc
@@ -144,7 +155,7 @@ def test_diagnostics_says_nothing_was_skipped_when_nothing_was():
         "is_superuser": "off",
         "skipped": [],
     }
-    doc = render_diagnostics(catalog, [T1], [], DEFAULT_TENANT_PATTERN)
+    doc = render_diagnostics(catalog, [T1], [], run())
     assert "None. Every relation in scope is an ordinary table." in doc
     assert "OK** - pg_stat_statements available" in doc
 
@@ -163,7 +174,7 @@ def test_nullability_only_change_is_drift():
     assert drift[0]["changed"] == [
         ("status", "character varying(32)", "character varying(32) NOT NULL")
     ]
-    doc = render_tenant_doc("invoice", result["invoice"], "d", tenant_total=3)
+    doc = render_tenant_doc("invoice", result["invoice"], "d", run(tenant_total=3))
     assert (
         f"- `{T3}` - `status` is `character varying(32) NOT NULL`, "
         "reference has `character varying(32)`" in doc
@@ -183,7 +194,7 @@ def test_drift_report_names_missing_and_extra_columns():
             }
         }
     )
-    doc = render_tenant_doc("invoice", result["invoice"], "d", tenant_total=4)
+    doc = render_tenant_doc("invoice", result["invoice"], "d", run(tenant_total=4))
     assert f"- `{T3}` - missing `amount`" in doc
     assert f"- `{T4}` - extra `refunded_at`" in doc
     assert "2 schema(s) differ from the reference." in doc
@@ -250,7 +261,7 @@ def test_build_bundle_writes_a_complete_okf_bundle():
 
 
 def check_bundle(tmp_path):
-    stats = build_bundle(fake_catalog(), tmp_path, DEFAULT_TENANT_PATTERN, "saas")
+    stats = build_bundle(fake_catalog(), settings(tmp_path))
 
     assert stats == {
         "tenant_docs": 1,
@@ -278,7 +289,7 @@ def check_bundle(tmp_path):
 def test_every_doc_carries_okf_v02_provenance():
     with tempfile.TemporaryDirectory() as workdir:
         out = Path(workdir)
-        build_bundle(fake_catalog(), out, DEFAULT_TENANT_PATTERN, "saas")
+        build_bundle(fake_catalog(), settings(out))
         docs = [
             out / "tenant" / "invoice.md",
             out / "global" / "meta.tenant.md",
