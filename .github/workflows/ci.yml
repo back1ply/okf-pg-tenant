@@ -98,8 +98,13 @@ jobs:
               "tenancy.schemas": (front["tenancy"]["schemas"], 5),
               "tenancy.tenant_schemas_total": (front["tenancy"]["tenant_schemas_total"], 6),
               "tenancy.absent_from": (front["tenancy"]["absent_from"], 1),
-              "tenancy.drift": (front["tenancy"]["drift"], 1),
+              "tenancy.column_drift": (front["tenancy"]["column_drift"], 1),
+              "tenancy.variants": (front["tenancy"]["variants"], 2),
+              "tenancy.reference_ambiguous": (front["tenancy"]["reference_ambiguous"], False),
               "generated.by": (front["generated"]["by"], "process:okf-pg-tenant"),
+              # COMMENT ON is read: the seed sets this one, so an empty
+              # description here means comment extraction silently regressed.
+              "description": (front["description"], "One row per issued invoice for this tenant."),
           }
           for name, (got, want) in checks.items():
               if got != want:
@@ -108,6 +113,16 @@ jobs:
           resource = front["sources"][0]["resource"]
           if "demo" in resource or "@" in resource:
               sys.exit(f"credentials leaked into sources.resource: {resource!r}")
+
+          # Claims the output must carry, not merely numbers that happen to match.
+          if "**Not compared**" not in doc:
+              sys.exit("the drift section no longer says what it does not compare")
+          if "Gross total, tax included." not in doc:
+              sys.exit("column comments are missing from the rendered table")
+
+          index = (bundle / "index.md").read_text(encoding="utf-8")
+          if "This inventory is incomplete" not in index:
+              sys.exit("index.md does not warn that views are undocumented")
 
           print("bundle verified:", {k: v[0] for k, v in checks.items()})
           PY

@@ -552,9 +552,15 @@ def render_diagnostics(catalog, tenant_schemas, empty_tenants, run):
         "",
         "## Read this before trusting the bundle",
         "",
-        "Structure comes from `pg_catalog`, which does not hide rows you lack",
-        "SELECT on. So an empty tenant schema means the schema really has no",
-        "tables, not that access was denied. New tenants are legitimately empty.",
+        "Structure comes from `pg_class`, `pg_attribute`, `pg_namespace`, `pg_index`",
+        "and `pg_description`. Those are world-readable and do not filter by",
+        "privilege, so an empty tenant schema means the schema really has no tables,",
+        "not that access was denied. New tenants are legitimately empty.",
+        "",
+        "That property belongs to those catalogs, not to `pg_catalog` as a whole:",
+        "`pg_stats` shows only rows for tables you may read, and `pg_authid` is not",
+        "publicly readable at all. Anything added here that reads a different catalog",
+        "must re-check its visibility rules.",
         "",
     ]
     return "\n".join(lines)

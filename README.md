@@ -99,9 +99,20 @@ pick as canonical.
 
 ### Runs on managed Postgres, least privilege
 
-`information_schema` filters rows by privilege, so a least-privilege account gets a silently
-incomplete picture. `pg_catalog` does not, and it is readable on Cloud SQL, RDS and friends with
-no table grants at all.
+`information_schema` filters rows by privilege — the Postgres docs are explicit that
+[`information_schema.tables`](https://www.postgresql.org/docs/current/infoschema-tables.html)
+shows "only those tables and views ... that the current user has access to". A least-privilege
+account therefore gets a silently incomplete picture.
+
+The base catalogs this tool reads — `pg_class`, `pg_attribute`, `pg_namespace`, `pg_index`,
+`pg_description` — are world-readable and do not filter that way, so the same account sees the
+full structure with no table grants at all.
+
+> [!NOTE]
+> That is a property of *those catalogs*, not of `pg_catalog` as a whole. `pg_stats` deliberately
+> [shows only rows for tables you may read](https://www.postgresql.org/docs/current/view-pg-stats.html),
+> and `pg_authid` is not publicly readable. An earlier version of this README claimed the
+> blanket version, which is wrong.
 
 ### Says what it could not read
 
@@ -267,7 +278,11 @@ any survives. All are caught.
   empty — the useful descriptions then live in a dbt project or in migration SQL, and reading
   those is a separate module.
 - **Only ordinary tables are documented** (`relkind = 'r'`). Views, materialized views, foreign
-  tables and partitioned tables are counted in `_diagnostics.md` but **not drift-checked**.
+  tables and partitioned tables are counted in `_diagnostics.md` and flagged in `index.md`, but
+  **not documented and not drift-checked**. Partitioning is the one most likely to surprise: a
+  tenant whose table is declaratively partitioned is a `p`, so it is absent from the bundle
+  rather than merely lacking detail. Its leaf partitions are `r` and would be documented
+  individually, which is not what a reader wants.
 - **A table absent from some tenants is counted, not itemised.** You get `absent_from: 3`, not
   the three schema names.
 - **Drift names tenant schemas in the output.** That is the point of the feature, but if schema

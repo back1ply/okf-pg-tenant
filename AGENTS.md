@@ -30,9 +30,13 @@ needs to read or write, it belongs in `fetch` or `build_bundle`, not scattered.
 
 1. **No comments in code.** Explanations go in `README.md` or here. The commit body carries the
    reasoning for a change.
-2. **`pg_catalog`, never `information_schema`.** `information_schema` filters rows by privilege,
-   so a least-privilege account silently sees less. That property is the entire reason this tool
-   works on managed Postgres with no grants.
+2. **Base catalogs, never `information_schema`.** `information_schema` filters rows by privilege,
+   so a least-privilege account silently sees less. `pg_class`, `pg_attribute`, `pg_namespace`,
+   `pg_index` and `pg_description` are world-readable and do not, which is the entire reason this
+   tool works on managed Postgres with no grants. **That is not true of `pg_catalog` as a whole**
+   — `pg_stats` shows only rows for tables you may read, and `pg_authid` is not publicly readable
+   — so any new query must have its visibility rules checked rather than assumed. The README
+   claimed the blanket version until it was checked against the docs and found wrong.
 3. **Nothing is written to the database.** Every query is a catalog read. No temp tables, no
    `SET`, no extensions installed.
 4. **Treat catalog values as untrusted.** A table name is whatever someone typed inside
