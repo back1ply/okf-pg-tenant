@@ -1,6 +1,6 @@
 # Working in this repo
 
-One module, `okf_pg_tenant.py`. It reads a PostgreSQL catalog and writes an
+One package, `src/okf_pg_tenant/`. It reads a PostgreSQL catalog and writes an
 [OKF v0.2](https://okf.md) bundle.
 
 `README.md` owns **what the tool does** — features, flags, output shape, current test and
@@ -10,26 +10,50 @@ rots.
 
 ## The shape
 
-Read the file top to bottom; it is ordered so nothing is used before it is defined.
+One module per job. The import graph is acyclic and each row may import only rows above it.
 
-| Region | What lives there |
-|---|---|
-| SQL constants | `SQL_SCHEMAS`, `SQL_COLUMNS`, … — the entire database surface, in one place |
-| Types | `Catalog`, `Run`, `Settings` |
-| Pure functions | `classify_schemas`, `signature`, `diff_signature`, `collapse`, `provenance`, … |
-| The one impure read | `fetch(conn)` — the only function that touches a database |
-| Renderers | `render_*` — data in, string out, no IO |
-| The one impure write | `build_bundle` — the only function that touches the filesystem |
-| CLI | `build_parser`, `settings_from`, `report`, `main` |
+| Module | What lives there | Imports from |
+|---|---|---|
+| `models.py` | `Run`, `Settings`, `Index`, and the `TypedDict` shapes (`Column`, `SkippedKind`, `SignatureDiff`, `DriftEntry`, `CollapsedTable`) | — |
+| `naming.py` | `doc_filename`, `resolve_doc_names`, `UNSAFE_FILENAME` — the path-traversal guard | — |
+| `collapse.py` | `classify_schemas`, `signature`, `diff_signature`, `collapse`, `drift_counts`, `partition_tables` — every drift decision, all pure | — |
+| `catalog.py` | `SQL_*` (the entire database surface, in one place), `Catalog`, `source_resource`, the `read_*` cursor readers, and `fetch(conn)` — the only function that takes a connection | `models` |
+| `render.py` | `provenance`, `yaml_scalar`, `capability_checks`, `cdc_block`, `geometry_columns`, all `render_*` — data in, string out, no IO | `catalog`, `collapse`, `models` |
+| `bundle.py` | `build_bundle` — the only function that touches the filesystem | `collapse`, `models`, `naming`, `render` |
+| `cli.py` | `DEFAULT_TENANT_PATTERN`, `build_parser`, `settings_from`, `report`, `main` | `bundle`, `catalog`, `models` |
+| `__init__.py` | re-exports only, so `from okf_pg_tenant import build_bundle` keeps working | all of the above |
+| `__main__.py` | two lines, so `python -m okf_pg_tenant` works | `cli` |
 
 **The split is the design.** Every decision the tool makes lives in a pure function, which is why
 the whole suite runs in about a second against no database. Keep new logic pure; if a change
-needs to read or write, it belongs in `fetch` or `build_bundle`, not scattered.
+needs to read or write, it belongs in `catalog.py` or `bundle.py`, not scattered.
+
+`catalog.py` is the only module that touches a database. Inside it, `fetch` is the only function
+that takes a *connection*; the `read_*` helpers take the cursor it opens, so the transaction
+boundary stays in one place while each result set is read by something small enough to name.
+
+The boundary is enforced twice. Once by imports: a catalog-shape change cannot reach a renderer
+except through an import you can see at the top of `render.py`. Once by types: the shape of a
+column record is named `Column` in `models.py` rather than being an anonymous dict, so moving it
+fails `mypy` instead of silently changing rendered output. That pair is the whole reason the
+split exists — the ordering it replaced was convention, not an interface.
+
+`psycopg` is imported inside `main()` and nowhere else, so importing the package, running the
+suite and running the mutation gate need nothing but the package itself. The package lives under
+`src/`, so it is not importable from the checkout root until installed: run
+`pip install -e ".[dev]"` first. That is deliberate. The tests then run against an installed
+package, and a file missing from the wheel fails locally rather than after release.
 
 ## Rules
 
-1. **No comments in code.** Explanations go in `README.md` or here. The commit body carries the
-   reasoning for a change.
+1. **Docstrings, never inline comments.** Every module, class and function under `src/` carries a
+   docstring saying why it exists; no `#` comment explains code inside a function. Tests are
+   exempt: a test's name is its docstring, and `test_a_dropped_column_is_missing_and_never_extra`
+   says more than a sentence under it would. A docstring travels with
+   the thing it describes and is reachable from `help()`; a comment three lines above a branch
+   rots where nobody is looking. Longer reasoning goes in `README.md` or here, and the commit
+   body carries the reasoning for a change. Configuration files (`pyproject.toml`, CI YAML) are
+   not code and may carry comments.
 2. **Base catalogs, never `information_schema`.** `information_schema` filters rows by privilege,
    so a least-privilege account silently sees less. `pg_class`, `pg_attribute`, `pg_namespace`,
    `pg_index` and `pg_description` are world-readable and do not, which is the entire reason this
@@ -47,25 +71,45 @@ needs to read or write, it belongs in `fetch` or `build_bundle`, not scattered.
 6. **Say what you could not read.** A missing capability gets named in `_diagnostics.md`.
    Silence is never a pass — which is why the producer also counts the relations it chose not to
    document.
-7. **Four arguments is the ceiling.** At five, the shared values want a type. That is what `Run`
-   and `Settings` are; they exist because four renderers had grown to five arguments.
-8. **No new dependency.** `psycopg` is the only one. A bundle producer that drags in a framework
-   does not get run against a production database on someone's laptop, which is the only place
-   it is useful.
+7. **Four arguments is the ceiling.** At five, the shared values want a type. That is what `Run`,
+   `Settings` and `Index` are; the first two exist because four renderers had grown to five
+   arguments, and `Index` because `render_index` later did the same. A boolean flag argument is
+   not an exception — split it into two functions, which is why the test suite has both `col` and
+   `pk_col`.
+8. **No new runtime dependency.** `psycopg` is the only one, and `[project.dependencies]` is
+   where that is enforced. A bundle producer that drags in a framework does not get run against a
+   production database on someone's laptop, which is the only place it is useful. Development
+   tooling is a separate question: `pytest`, `ruff`, `mypy` and `cosmic-ray` live in
+   `[project.optional-dependencies] dev` and never reach a user's install. Nothing under `src/`
+   may import them.
 
 ## Before you call it done
 
 ```bash
-python test_okf_pg_tenant.py    # no framework, no database
-python mutants.py               # deliberate bugs, all must be caught
+ruff check .              # lint
+ruff format --check .     # formatting
+mypy                      # types, strict
+pytest -q                 # no database
+python mutation_gate.py   # mutation testing
 ```
 
-**Both must pass. `mutants.py` is not optional.** It is the only thing standing between "the
-tests are green" and "the tests check something". Add a mutant for any behaviour you add — a
-branch nobody can break is a branch nobody is testing.
+**All five must pass. `mutation_gate.py` is not optional.** It is the only thing standing
+between "the tests are green" and "the tests check something".
 
-A surviving mutant is a missing test, never a broken script. The one that survived during
-development was the credential-leak mutant, because `source_resource` had no test at all.
+It wraps `cosmic-ray`, which derives mutants from the syntax tree rather than from a hand-written
+list, so it generates them for any behaviour you add without being told. That is the whole reason
+it replaced the hand-rolled script: a curated list only ever covers the bugs its author thought
+of. The cost is that it cannot tell a missing test from a mutation that cannot change behaviour,
+which is what `mutation-baseline.md` is for.
+
+**A surviving mutant is a missing test, never a broken script.** When one survives, write the
+test that kills it. Only when a mutation provably cannot change observable behaviour does it go
+in `mutation-baseline.md`, with the argument for why. The gate fails on any survivor that is not
+recorded there, and equally on any recorded entry the tool no longer generates — a baseline that
+is allowed to drift stops describing the code and becomes a list of excuses.
+
+Line coverage is not this. `collapse.py` was at 100% line coverage and still had five real test
+gaps that only mutation found.
 
 For a change that touches rendering, prove the output did not move: render the demo database
 before and after, then
@@ -98,9 +142,19 @@ diff -r -I '^ *at: ' -I '^timestamp:' before-bundle after-bundle
 - **A tie for most common is reported, not resolved.** With no majority the reference is picked
   alphabetically and `reference_ambiguous: true` is set, because a rename or a new tenant would
   otherwise silently change what the bundle calls canonical.
-- **`fetch()` and `main()` are the only uncovered lines.** They are the database and CLI shell,
-  proven by running the tool against a real database rather than by feeding a mock cursor its
-  own answers back. Chasing them would mean asserting that a fake returns what it was told to.
+- **`okf_pg_tenant.collapse` is the function, not the module.** `__init__.py` re-exports the
+  `collapse` function, which shadows the same-named submodule as an attribute. Every import
+  form still resolves correctly — `from okf_pg_tenant.collapse import signature` gives the
+  module's contents, `from okf_pg_tenant import collapse` gives the function — so this is a
+  naming collision, not a broken package. Renaming either one is a public API change.
+- **`catalog.fetch()`, `cli.py` and `__main__.py` are the only uncovered lines.** They are the
+  database and CLI shell, proven by running the tool against a real database rather than by
+  feeding a mock cursor its own answers back. Chasing them would mean asserting that a fake
+  returns what it was told to. `cli.py` is excluded from the mutation config for the same reason;
+  `fetch`'s surviving mutants are recorded in `mutation-baseline.md` rather than hidden.
+- **The mutation gate needs `python -m` on Windows.** Smart App Control blocks the unsigned
+  `.exe` launchers that `pytest`, `ruff`, `mypy` and `cosmic-ray` install. `python -m pytest`,
+  `python -m ruff`, and so on are the same entry points and are not affected.
 
 ## Two findings from a live run
 

@@ -9,3 +9,7 @@ v02-check/
 dist/
 build/
 *.egg-info/
+*.sqlite
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

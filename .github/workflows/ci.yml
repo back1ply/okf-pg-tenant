@@ -10,6 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --quiet -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      # mypy no longer accepts --python-version 3.9, so it runs unpinned and the
+      # 3.9 floor is proven by ruff's target-version plus the 3.9 job below.
+      - name: Types
+        run: mypy
+
   test:
     # The version floor is a claim until something runs it. vermin puts the real
     # floor at 3.7; 3.9 is what the project supports, so 3.9 is what gets proven.
@@ -19,25 +42,44 @@ jobs:
         python-version: ["3.9", "3.12", "3.13"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Tests
-        run: python test_okf_pg_tenant.py
+      # src-layout means the package is not importable from the checkout root.
+      # That is the point: the tests below run against an installed package, so
+      # a file missing from the wheel fails here instead of after release.
+      - name: Install
+        run: python -m pip install --quiet -e ".[dev]"
 
-      # Not decoration. A green suite says the tests ran, not that they check
-      # anything; this says thirteen deliberate bugs were each caught. It exits
-      # nonzero if any survives, and restores the source either way.
-      - name: Mutation gate
-        run: python mutants.py
+      - name: Tests
+        run: pytest -q
 
       - name: Package installs and the console script exists
         run: |
           python -m pip install --quiet .
           okf-pg-tenant --help
+
+  mutation:
+    # Mutation testing is version-independent, so it runs once rather than three
+    # times. Not decoration: a green suite says the tests ran, not that they check
+    # anything. This says every mutant the tool could generate was caught, and the
+    # survivors that remain are recorded with a reason in mutation-baseline.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --quiet -e ".[dev]"
+
+      - name: Mutation gate
+        run: python mutation_gate.py
 
   end-to-end:
     # The unit suite never touches a database by design, so nothing above proves
@@ -57,9 +99,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 

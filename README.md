@@ -62,8 +62,10 @@ tenancy:
   schemas: 797
   tenant_schemas_total: 800
   absent_from: 3
-  drift: 3
+  column_drift: 3
+  variants: 2
   reference_schema: <the schema the columns were read from>
+  reference_ambiguous: false
 ```
 
 `absent_from` matters: a table present in only some tenants is a mid-rollout migration, and a
@@ -184,8 +186,15 @@ rather than one silently overwriting the other.
 pip install git+https://github.com/back1ply/okf-pg-tenant
 ```
 
-That installs an `okf-pg-tenant` command. Or clone and run the single file directly, which needs
-only `pip install "psycopg[binary]"` — there are no other dependencies.
+That installs an `okf-pg-tenant` command, and `psycopg` is its only runtime dependency. To work
+on it instead, clone and install in place — the package lives under `src/`, so it is not
+importable from the checkout root until installed:
+
+```bash
+git clone https://github.com/back1ply/okf-pg-tenant
+cd okf-pg-tenant
+pip install -e ".[dev]"
+```
 
 > [!TIP]
 > On Windows machines with Smart App Control, the installed `.exe` launcher is unsigned and gets
@@ -199,9 +208,8 @@ assumed — the code itself needs only 3.7.
 ```bash
 okf-pg-tenant --dsn "postgresql://user@host:5432/db" --out ./bundle
 
-# equivalents, if you cloned instead of installing
+# equivalent entry point, and the one to use on Windows
 python -m okf_pg_tenant --dsn "..." --out ./bundle
-python okf_pg_tenant.py --dsn "..." --out ./bundle
 ```
 
 | Flag | Default | Meaning |
@@ -247,29 +255,34 @@ Clean up with `docker rm -f okf-demo-pg`.
 ## Evidence
 
 ```bash
-python test_okf_pg_tenant.py    # 23 tests, plain asserts, no framework, no database
-python mutants.py               # 10 deliberate bugs, all must be caught
+ruff check . && ruff format --check .   # lint and formatting
+mypy                                    # strict, zero errors
+pytest -q                               # plain asserts, no database
+python mutation_gate.py                 # mutation testing
 ```
 
-**Coverage is 81%**, and the uncovered lines are exactly three things: `fetch()`, `main()`, and
-the `__main__` guard. Every line that decides anything is covered; what is not covered is the
-database and CLI shell, proven by running the tool against a real database rather than by
-feeding a mock cursor its own answers back.
+Coverage is not spread evenly, on purpose: every line that decides anything is covered, and what
+is not covered is the database and CLI shell — `catalog.fetch()`, `cli.py`, `__main__.py`. Those
+are proven by running the tool against a real database in CI rather than by feeding a mock cursor
+its own answers back.
 
-**The suite is mutation-checked.** `mutants.py` introduces seventeen deliberate bugs one at a time —
-the reference group picked by rarest signature instead of most common, `signature` ignoring
-nullability, `absent_from` adding instead of subtracting, filename sanitising disabled,
-collision detection disabled, the source URI leaking a password, and others. It restores the source afterwards and exits nonzero if
-any survives. All are caught.
+**The suite is mutation-checked.** `mutation_gate.py` wraps `cosmic-ray`, which derives mutants
+from the syntax tree rather than from a list someone wrote. It generates **589** of them across
+the package and the suite kills **559**. The remaining 30 are listed one by one in
+[mutation-baseline.md](mutation-baseline.md), each with the argument for why it cannot change
+observable behaviour — or, for the eighteen inside `fetch`, why the unit suite is deliberately
+not the thing that covers it. The gate fails on any survivor that is not listed, and equally on
+any listed entry the tool stops generating.
 
 > [!IMPORTANT]
-> A test suite that has never been seen failing is not evidence. That is what `mutants.py` is
-> for, and why it ships in the repo instead of being a claim in this file.
+> A test suite that has never been seen failing is not evidence. That is what the mutation gate
+> is for, and why it ships in the repo instead of being a claim in this file.
 >
-> Its limit is worth stating plainly: these are **hand-picked** mutants, so they cover the bugs
-> the author thought of, not the space of possible bugs. They raise the floor; they do not
-> survey it. A systematic mutation tool over the pure functions would be strictly better and is
-> on the roadmap.
+> **Line coverage is not this.** `collapse.py` sat at 100% line coverage and still had five real
+> test gaps that only mutation found — among them a drift comparison that silently passed when a
+> tenant's column type sorted before the reference's. Adopting a systematic tool over the
+> hand-written one raised the test count from 23 to 43 and killed 30 mutants that a green,
+> fully-covered suite had never touched.
 
 ## Known limits
 
