@@ -1,6 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "schedule:weekly",
+    "group:allNonMajor",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "A human approves every bump (kept from the old Dependabot setup)",
+      "matchPackageNames": [
+        "*"
+      ],
+      "automerge": false
+    }
   ]
 }
