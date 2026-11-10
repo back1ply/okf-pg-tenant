@@ -15,5 +15,6 @@
       ],
       "automerge": false
     }
-  ]
+  ],
+  "osvVulnerabilityAlerts": true
 }
